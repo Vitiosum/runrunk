@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
+use Carbon\CarbonInterval;
 
 class RunController extends Controller
 {
@@ -15,106 +16,60 @@ class RunController extends Controller
     {
         $validated = $request->validate([
             'distance' => 'required|in:5k,10k,21k,42k',
-            'time' => ['required', 'regex:/^\d{1,2}(:\d{2})?$/'],
+            'time' => 'required|string',
         ]);
 
-        $timeInput = $validated['time'];
+        $rawTime = trim($validated['time']);
 
-        if (!str_contains($timeInput, ':')) {
-            $timeInput .= ':00';
+        // Parse du temps (minutes / heures / secondes)
+        if (preg_match('/^\d+$/', $rawTime)) {
+            $interval = CarbonInterval::minutes((int) $rawTime);
+        } elseif (preg_match('/^\d+:\d{2}$/', $rawTime)) {
+            [$m, $s] = explode(':', $rawTime);
+            $interval = CarbonInterval::minutes((int) $m)->seconds((int) $s);
+        } elseif (preg_match('/^\d+:\d{2}:\d{2}$/', $rawTime)) {
+            [$h, $m, $s] = explode(':', $rawTime);
+            $interval = CarbonInterval::hours((int) $h)
+                ->minutes((int) $m)
+                ->seconds((int) $s);
+        } else {
+            return back()->withErrors([
+                'time' => 'Format invalide (ex : 20, 20:00, 1:20:00)',
+            ]);
         }
 
-        [$minutes, $seconds] = explode(':', $timeInput);
-        $totalSeconds = ((int) $minutes * 60) + (int) $seconds;
+        $totalSeconds = $interval->totalSeconds;
 
-        $distribution = $this->getDistribution($validated['distance']);
+        // Distances en km
+        $distanceKm = [
+            '5k'  => 5,
+            '10k' => 10,
+            '21k' => 21.1,
+            '42k' => 42.195,
+        ];
 
-        $percentile = 0;
-        foreach ($distribution as $time => $p) {
-            if ($totalSeconds <= $time) {
-                $percentile = $p;
-                break;
-            }
-        }
+        // Paces de référence (sec/km)
+        $referencePace = [
+            '5k'  => 240,
+            '10k' => 255,
+            '21k' => 270,
+            '42k' => 300,
+        ];
 
-        $rank = $this->getRankFromPercentile($percentile);
+        $km = $distanceKm[$validated['distance']];
+        $paceSeconds = $totalSeconds / $km;
+
+        // Normalisation
+        $score = $referencePace[$validated['distance']] / $paceSeconds;
+
+        // Clamp + percentile
+        $percentile = max(0, min(100, round($score * 50)));
 
         return view('result', [
-            'distance' => $validated['distance'],
-            'time' => $timeInput,
+            'distance'   => $validated['distance'],
+            'time'       => $interval->cascade()->forHumans(['short' => true]),
+            'pace'       => gmdate('i:s', (int) $paceSeconds),
             'percentile' => $percentile,
-            'rank' => $rank,
         ]);
-    }
-
-    private function getRankFromPercentile(int $percentile): string
-    {
-        return match (true) {
-            $percentile >= 99 => 'Challenger',
-            $percentile >= 95 => 'Grandmaster',
-            $percentile >= 90 => 'Master',
-            $percentile >= 80 => 'Diamond',
-            $percentile >= 65 => 'Platinum',
-            $percentile >= 40 => 'Gold',
-            $percentile >= 20 => 'Silver',
-            $percentile >= 6  => 'Bronze',
-            default           => 'Iron',
-        };
-    }
-
-    private function getDistribution(string $distance): array
-    {
-        return match ($distance) {
-
-            '5k' => [
-                900  => 99,
-                1080 => 95,
-                1200 => 90,
-                1350 => 80,
-                1500 => 70,
-                1800 => 50,
-                2100 => 30,
-                2400 => 15,
-                2700 => 5,
-            ],
-
-            '10k' => [
-                2100 => 99,
-                2400 => 95,
-                2700 => 90,
-                3000 => 80,
-                3300 => 70,
-                3600 => 50,
-                4200 => 30,
-                4800 => 15,
-                5400 => 5,
-            ],
-
-            '21k' => [
-                4800  => 99,
-                5400  => 95,
-                6000  => 90,
-                6600  => 80,
-                7200  => 70,
-                8100  => 50,
-                9000  => 30,
-                10800 => 15,
-                12600 => 5,
-            ],
-
-            '42k' => [
-                9000  => 99,
-                10800 => 95,
-                12600 => 90,
-                14400 => 80,
-                16200 => 70,
-                18000 => 50,
-                21600 => 30,
-                25200 => 15,
-                28800 => 5,
-            ],
-
-            default => [],
-        };
     }
 }
